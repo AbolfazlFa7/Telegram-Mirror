@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,8 @@ HEADERS = {
 def parse_message(el):
     msg = {}
 
-    msg["id"] = el.get("data-post", "")
+    msg_id = el.get("data-post", "")
+    msg["id"] = msg_id
 
     date_el = el.select_one(".tgme_widget_message_date time")
     if date_el:
@@ -54,13 +56,19 @@ def parse_message(el):
             msg["album"].append(m.group(1))
 
     # Single photo
-    msg["photo"] = msg["album"][0] if len(msg["album"]) == 1 else ""
+    photo_el = el.select_one(".tgme_widget_message_photo_wrap")
+    if photo_el:
+        style = photo_el.get("style", "")
+        m = re.search(r"url\('(.+?)'\)", style)
+        msg["photo"] = m.group(1) if m else ""
+    else:
+        msg["photo"] = ""
 
     # Video
     video_el = el.select_one("video")
     msg["video"] = video_el.get("src", "") if video_el else ""
 
-    # Video thumb
+    # Video thumbnail
     if video_el:
         thumb = el.select_one(".tgme_widget_message_video_thumb")
         if thumb:
@@ -69,12 +77,11 @@ def parse_message(el):
             msg["video_thumb"] = m.group(1) if m else ""
         else:
             msg["video_thumb"] = ""
+        duration_el = el.select_one(".tgme_widget_message_video_duration")
+        msg["video_duration"] = duration_el.get_text(strip=True) if duration_el else ""
     else:
         msg["video_thumb"] = ""
-
-    # Duration
-    duration_el = el.select_one(".tgme_widget_message_video_duration")
-    msg["video_duration"] = duration_el.get_text(strip=True) if duration_el else ""
+        msg["video_duration"] = ""
 
     # Document
     doc_el = el.select_one(".tgme_widget_message_document")
@@ -83,7 +90,6 @@ def parse_message(el):
         extra_el = doc_el.select_one(".tgme_widget_message_document_extra")
         msg["doc_title"] = title_el.get_text(strip=True) if title_el else ""
         msg["doc_extra"] = extra_el.get_text(strip=True) if extra_el else ""
-        # try to get download link
         link_wrap = el.select_one("a.tgme_widget_message_document_wrap, a[href*='tg_file']")
         msg["doc_url"] = link_wrap.get("href", "") if link_wrap else ""
     else:
@@ -139,49 +145,61 @@ def fetch_channel(channel, count):
             resp = requests.get(url, headers=HEADERS, timeout=30)
             resp.raise_for_status()
         except Exception as e:
-            print(f"[!] Error: {e}")
+            print(f"[!] Error fetching URL: {e}")
             break
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        try:
+            soup = BeautifulSoup(resp.text, "lxml")
+        except Exception as e:
+            print(f"[!] Error parsing HTML: {e}")
+            break
 
         if before is None:
-            title_el = soup.select_one(".tgme_channel_info_header_title")
-            if title_el:
-                channel_info["title"] = title_el.get_text(strip=True)
-            desc_el = soup.select_one(".tgme_channel_info_description")
-            if desc_el:
-                channel_info["description"] = desc_el.get_text(strip=True)
-            avatar_el = soup.select_one(".tgme_page_photo_image img, .tgme_channel_info_header_image img")
-            if avatar_el:
-                channel_info["avatar"] = avatar_el.get("src", "")
-            members_el = soup.select_one(".tgme_channel_info_counter .counter_value")
-            if members_el:
-                channel_info["members"] = members_el.get_text(strip=True)
+            try:
+                title_el = soup.select_one(".tgme_channel_info_header_title")
+                if title_el:
+                    channel_info["title"] = title_el.get_text(strip=True)
+                desc_el = soup.select_one(".tgme_channel_info_description")
+                if desc_el:
+                    channel_info["description"] = desc_el.get_text(strip=True)
+                avatar_el = soup.select_one(".tgme_page_photo_image img, .tgme_channel_info_header_image img")
+                if avatar_el:
+                    channel_info["avatar"] = avatar_el.get("src", "")
+                members_el = soup.select_one(".tgme_channel_info_counter .counter_value")
+                if members_el:
+                    channel_info["members"] = members_el.get_text(strip=True)
+                print(f"[+] Channel: {channel_info['title']} ({channel_info['members']} members)")
+            except Exception as e:
+                print(f"[!] Error parsing channel info: {e}")
 
-        bubbles = soup.select(".tgme_widget_message_wrap")
-        if not bubbles:
-            print("[!] No messages found.")
+        try:
+            bubbles = soup.select(".tgme_widget_message_wrap")
+            if not bubbles:
+                print("[!] No messages found.")
+                break
+
+            page_messages = []
+            for b in bubbles:
+                inner = b.select_one(".tgme_widget_message")
+                if inner:
+                    page_messages.append(parse_message(inner))
+
+            if not page_messages:
+                break
+
+            messages = page_messages + messages
+            ids = [int(m["id"].split("/")[-1]) for m in page_messages if m["id"]]
+            if not ids:
+                break
+            before = min(ids)
+
+            if len(messages) >= count:
+                break
+
+            time.sleep(0.8)
+        except Exception as e:
+            print(f"[!] Error processing messages: {e}")
             break
-
-        page_messages = []
-        for b in bubbles:
-            inner = b.select_one(".tgme_widget_message")
-            if inner:
-                page_messages.append(parse_message(inner))
-
-        if not page_messages:
-            break
-
-        messages = page_messages + messages
-        ids = [int(m["id"].split("/")[-1]) for m in page_messages if m["id"]]
-        if not ids:
-            break
-        before = min(ids)
-
-        if len(messages) >= count:
-            break
-
-        time.sleep(0.8)
 
     messages = messages[-count:]
     print(f"[+] Got {len(messages)} messages")
@@ -189,38 +207,36 @@ def fetch_channel(channel, count):
 
 
 def escape_md(text):
-    """فقط کاراکترهای خطرناک HTML رو escape می‌کنیم"""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render_message_md(m):
-    """هر پیام رو به صورت یه کارت جداگانه در Markdown رندر می‌کنه"""
+    """هر پیام رو به صورت یه کارت جداگانه با table رندر می‌کنه"""
     lines = []
 
-    # شروع کارت با table (تنها راه border در GitHub MD)
     lines.append("<table>")
     lines.append("<tr><td>")
     lines.append("")
 
-    # ── فوروارد ──
+    # فوروارد
     if m.get("forwarded_from"):
         lines.append(f"> ↪ **فوروارد از:** {escape_md(m['forwarded_from'])}")
         lines.append("")
 
-    # ── آلبوم (چند عکس) ──
+    # آلبوم (چند عکس)
     if m.get("album") and len(m["album"]) > 1:
         lines.append("<table><tr>")
         for ph in m["album"]:
             lines.append(f'<td><a href="{ph}"><img src="{ph}" width="200"/></a></td>')
         lines.append("</tr></table>")
         lines.append("")
-    # ── عکس تکی ──
+    # عکس تکی
     elif m.get("photo"):
         ph = m["photo"]
         lines.append(f'<a href="{ph}"><img src="{ph}" width="400"/></a>')
         lines.append("")
 
-    # ── ویدیو ──
+    # ویدیو — دیزاین شبیه تلگرام
     if m.get("video"):
         thumb = m.get("video_thumb", "")
         duration = m.get("video_duration", "")
@@ -228,21 +244,40 @@ def render_message_md(m):
         if thumb:
             lines.append(f'<a href="{vid_url}"><img src="{thumb}" width="400"/></a>')
             lines.append("")
-        dur_text = f" `{duration}`" if duration else ""
-        lines.append(f'🎬 **ویدیو**{dur_text} — **[⬇ دانلود ویدیو]({vid_url})**')
+        lines.append("<table><tr>")
+        lines.append('<td width="52">')
+        lines.append(f'<a href="{vid_url}"><img src="https://img.shields.io/badge/%E2%96%B6-2CA5E0?style=flat-square&logoColor=white" width="42" height="42"/></a>')
+        lines.append("</td><td>")
+        dur_text = f'<sub>{duration}</sub>' if duration else ""
+        lines.append(f'<b><a href="{vid_url}">⬇ دانلود ویدیو</a></b><br/>{dur_text}')
+        lines.append("</td></tr></table>")
         lines.append("")
 
-    # ── فایل/سند ──
+    # فایل/سند — دیزاین شبیه تلگرام
     if m.get("doc_title"):
         doc_url = m.get("doc_url", "")
-        doc_extra = f" `{escape_md(m['doc_extra'])}`" if m.get("doc_extra") else ""
+        doc_title = escape_md(m["doc_title"])
+        doc_extra = escape_md(m.get("doc_extra", ""))
+
+        lines.append("<table><tr>")
+        lines.append('<td width="52">')
         if doc_url:
-            lines.append(f'📄 **[{escape_md(m["doc_title"])}]({doc_url})**{doc_extra}')
+            lines.append(f'<a href="{doc_url}"><img src="https://img.shields.io/badge/%E2%AC%87-2CA5E0?style=flat-square&logoColor=white" width="42" height="42"/></a>')
         else:
-            lines.append(f'📄 **{escape_md(m["doc_title"])}**{doc_extra}')
+            lines.append('<img src="https://img.shields.io/badge/%E2%AC%87-555?style=flat-square&logoColor=white" width="42" height="42"/>')
+        lines.append("</td>")
+        lines.append("<td>")
+        if doc_url:
+            lines.append(f'<b><a href="{doc_url}">{doc_title}</a></b><br/>')
+        else:
+            lines.append(f'<b>{doc_title}</b><br/>')
+        if doc_extra:
+            lines.append(f'<sub>{doc_extra}</sub>')
+        lines.append("</td>")
+        lines.append("</tr></table>")
         lines.append("")
 
-    # ── نظرسنجی ──
+    # نظرسنجی
     if m.get("poll_question"):
         lines.append(f'📊 **{escape_md(m["poll_question"])}**')
         lines.append("")
@@ -250,20 +285,19 @@ def render_message_md(m):
             lines.append(f"▫️ {escape_md(opt)}")
         lines.append("")
 
-    # ── متن پیام ──
+    # متن پیام
     if m.get("text"):
         text = escape_md(m["text"])
-        # تبدیل newline به <br> برای حفظ فرمت
         text = text.replace("\n", "<br/>")
         lines.append(text)
         lines.append("")
 
-    # ── ری‌اکشن‌ها ──
+    # ری‌اکشن‌ها
     if m.get("reactions"):
         lines.append("&nbsp;&nbsp;".join(m["reactions"]))
         lines.append("")
 
-    # ── فوتر (بازدید + تاریخ) ──
+    # فوتر
     footer_parts = []
     if m.get("views"):
         footer_parts.append(f"👁 **{m['views']}**")
@@ -278,7 +312,7 @@ def render_message_md(m):
     lines.append("")
     lines.append("</td></tr>")
     lines.append("</table>")
-    lines.append("")  # فاصله بین کارت‌ها
+    lines.append("")
 
     return "\n".join(lines)
 
@@ -291,7 +325,7 @@ def render_markdown(messages, channel_info, channel, fetch_time):
     desc = channel_info.get("description", "")
     avatar = channel_info.get("avatar", "")
 
-    # ── هدر کانال ──
+    # هدر کانال
     lines.append('<div align="center">')
     lines.append("")
     if avatar:
@@ -319,11 +353,11 @@ def render_markdown(messages, channel_info, channel, fetch_time):
     lines.append("---")
     lines.append("")
 
-    # ── پیام‌ها ──
+    # پیام‌ها
     for m in messages:
         lines.append(render_message_md(m))
 
-    # ── فوتر صفحه ──
+    # فوتر صفحه
     lines.append("---")
     lines.append("")
     lines.append('<div align="center">')
@@ -334,34 +368,54 @@ def render_markdown(messages, channel_info, channel, fetch_time):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--channel", required=True)
-    parser.add_argument("--count", type=int, default=100)
-    args = parser.parse_args()
+    try:
+        parser = argparse.ArgumentParser(description="Fetch Telegram channel messages")
+        parser.add_argument("--channel", required=True, help="Channel username (without @)")
+        parser.add_argument("--count", type=int, default=100, help="Number of messages to fetch")
+        args = parser.parse_args()
 
-    channel = args.channel.lstrip("@").strip()
-    count = max(10, min(args.count, 200))
+        channel = args.channel.lstrip("@").strip()
+        if not channel:
+            print("[!] Error: Channel name is empty")
+            sys.exit(1)
 
-    messages, channel_info = fetch_channel(channel, count)
+        count = max(10, min(args.count, 200))
+        print(f"[*] Parameters: channel=@{channel}, count={count}")
 
-    if not messages:
-        print("[!] No messages.")
-        return
+        messages, channel_info = fetch_channel(channel, count)
 
-    now = datetime.utcnow()
-    fetch_time = now.strftime("%Y-%m-%d %H:%M UTC")
-    file_date = now.strftime("%Y-%m-%d_%H-%M")
+        if not messages:
+            print("[!] No messages fetched.")
+            sys.exit(1)
 
-    md = render_markdown(messages, channel_info, channel, fetch_time)
+        now = datetime.utcnow()
+        fetch_time = now.strftime("%Y-%m-%d %H:%M UTC")
+        file_date = now.strftime("%Y-%m-%d_%H-%M")
 
-    out_dir = Path("channels")
-    out_dir.mkdir(exist_ok=True)
+        md = render_markdown(messages, channel_info, channel, fetch_time)
 
-    filename = f"{channel}_{file_date}.md"
-    out_file = out_dir / filename
-    out_file.write_text(md, encoding="utf-8")
+        out_dir = Path("channels")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[+] Created directory: {out_dir}")
+        except Exception as e:
+            print(f"[!] Error creating directory: {e}")
+            sys.exit(1)
 
-    print(f"[✓] Saved: {out_file}")
+        filename = f"{channel}_{file_date}.md"
+        out_file = out_dir / filename
+
+        try:
+            out_file.write_text(md, encoding="utf-8")
+            file_size = out_file.stat().st_size
+            print(f"[✓] Saved: {out_file} ({file_size} bytes)")
+        except Exception as e:
+            print(f"[!] Error writing file: {e}")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"[!] Unexpected error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
