@@ -74,7 +74,7 @@ Settings → Actions → General → Workflow permissions
 
 1. روی **📡 Fetch Telegram Channel** کلیک کنید
 2. روی **Run workflow** کلیک کنید
-3. نام کانال را **بدون @** وارد کنید — مثال: `bbcpersian`
+3. نام کانال را **بدون @** وارد کنید — مثال: `channel_username`
 4. تعداد پیام را وارد کنید (پیش‌فرض: ۱۰۰)
 5. **Run workflow** را بزنید
 
@@ -211,7 +211,7 @@ MIT License — آزاد برای استفاده شخصی
 
 <div align="center">
 
-ساخته شده با ❤️ برای دسترسی آزاد به اطلاعات
+ساخته شده با ❤️
 
 ---
 
